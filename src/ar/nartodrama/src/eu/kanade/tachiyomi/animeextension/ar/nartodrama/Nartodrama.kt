@@ -129,7 +129,6 @@ class Nartodrama :
         )
         private val QUALITY_VALUES = arrayOf("auto", "360", "480", "720", "1080", "max")
         private val STREAM_INF_REGEX = Regex("""#EXT-X-STREAM-INF""")
-        private val RESOLUTION_REGEX = Regex("""RESOLUTION=\d+x(\d+)""")
 
         /**
          * Mints a stateless `rs_ctx` JWT. The edge refresh-source API validates
@@ -323,7 +322,9 @@ class Nartodrama :
         for (i in 0 until 2) {
             for (hs in headerSets) {
                 last = runCatching {
-                    client.newCall(GET(url, hs)).execute().use { it.bodyString() }
+                    client.newCall(GET(url, hs)).execute().use { response ->
+                        if (response.isSuccessful) response.bodyString() else null
+                    }
                 }.getOrNull()
                 if (!last.isNullOrBlank()) return last
             }
@@ -340,24 +341,20 @@ class Nartodrama :
      * OctopusExtractor), so it is deliberately not done here.
      */
     private fun buildMasterVideos(masterUrl: String, subs: List<Track>, heightLabels: List<Int>, masterBody: String?): List<Video> {
-        val heights = masterBody
-            ?.let { RESOLUTION_REGEX.findAll(it).mapNotNull { m -> m.groupValues[1].toIntOrNull() }.toList() }
-            .orEmpty()
-            .distinct()
-            .sortedDescending()
-            .ifEmpty { heightLabels }
-
-        if (heights.isEmpty()) return listOf(masterVideo(masterUrl, subs, heightLabels, playbackHeaders))
-
-        return heights.distinct().sortedDescending().map { height ->
+        // mydramawave masters are adaptive: video variants plus a standalone
+        // `#EXT-X-MEDIA` audio rendition, passed through unmodified so the audio
+        // rendition is selected natively by the player's demuxer. A single "Auto"
+        // entry is exposed rather than one fixed-resolution entry per variant,
+        // since every entry would resolve to the same adaptive master URL.
+        return listOf(
             Video(
                 url = masterUrl,
-                quality = "Narto Drama · ${height}p",
+                quality = "Narto Drama · Auto",
                 videoUrl = masterUrl,
                 headers = playbackHeaders,
                 subtitleTracks = subs,
-            )
-        }
+            ),
+        )
     }
 
     private fun masterVideo(masterUrl: String, subs: List<Track>, heightLabels: List<Int>, headers: Headers): Video = Video(
