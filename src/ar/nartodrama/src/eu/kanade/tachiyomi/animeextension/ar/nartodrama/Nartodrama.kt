@@ -1,9 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.ar.nartodrama
 
 import android.util.Base64
-import androidx.preference.ListPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -14,7 +11,6 @@ import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -47,9 +43,7 @@ import org.jsoup.nodes.Element
  *   resolves to a direct signed .ts file which rejects the narto Referer
  *   ("denied by Referer ACL"), so it is played with referer-free headers.
  */
-class Nartodrama :
-    AnimeHttpSource(),
-    ConfigurableAnimeSource {
+class Nartodrama : AnimeHttpSource() {
 
     override val name = "نارتو دراما"
 
@@ -98,36 +92,10 @@ class Nartodrama :
         .add("Connection", "keep-alive")
         .build()
 
-    private val preferences by getPreferencesLazy()
-
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    // =========================== Preferences =============================
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        ListPreference(screen.context).apply {
-            key = PREF_DEFAULT_QUALITY
-            title = "الجودة الافتراضية للتشغيل"
-            entries = QUALITY_ENTRIES
-            entryValues = QUALITY_VALUES
-            setDefaultValue(DEFAULT_QUALITY)
-            summary = "%s"
-        }.also(screen::addPreference)
-    }
-
     companion object {
-        private const val PREF_DEFAULT_QUALITY = "default_quality"
-        private const val DEFAULT_QUALITY = "auto"
-        private val QUALITY_ENTRIES = arrayOf(
-            "الأقل جودة (تشغيل سريع)",
-            "360p",
-            "480p",
-            "720p",
-            "1080p",
-            "الأعلى جودة",
-        )
-        private val QUALITY_VALUES = arrayOf("auto", "360", "480", "720", "1080", "max")
         private val STREAM_INF_REGEX = Regex("""#EXT-X-STREAM-INF""")
 
         /**
@@ -306,14 +274,14 @@ class Nartodrama :
             else -> {
                 val masterBody = fetchQuietly(masterUrl)
                 if (STREAM_INF_REGEX.containsMatchIn(masterBody ?: "")) {
-                    buildMasterVideos(masterUrl, subtitleList, heightLabels, masterBody)
+                    buildMasterVideos(masterUrl, subtitleList)
                 } else {
                     listOf(masterVideo(masterUrl, subtitleList, heightLabels, flatPlaybackHeaders))
                 }
             }
         }
 
-        return videos.orderByDefaultQuality()
+        return videos
     }
 
     /** Lightweight fetch returning the playlist body, or null on any failure.
@@ -335,29 +303,24 @@ class Nartodrama :
     }
 
     /**
-     * Builds one [Video] per declared resolution, all pointing at the same HLS
-     * master URL. The video variants are video-only; audio is a separate
+     * Builds a single adaptive [Video] pointing at the mydramawave HLS master.
+     * The master's video variants are video-only; audio is a separate
      * `#EXT-X-MEDIA` rendition. Handing the untouched master to the player lets
      * its demuxer (mpv) select the audio rendition natively — re-attaching the
      * rendition as `Track`-based `audioTracks` is unreliable on mpv (verified in
-     * OctopusExtractor), so it is deliberately not done here.
+     * OctopusExtractor), so it is deliberately not done here. Only one "Auto"
+     * entry is exposed because every variant resolves to the same adaptive master
+     * URL, so per-resolution entries could not actually be selected.
      */
-    private fun buildMasterVideos(masterUrl: String, subs: List<Track>, heightLabels: List<Int>, masterBody: String?): List<Video> {
-        // mydramawave masters are adaptive: video variants plus a standalone
-        // `#EXT-X-MEDIA` audio rendition, passed through unmodified so the audio
-        // rendition is selected natively by the player's demuxer. A single "Auto"
-        // entry is exposed rather than one fixed-resolution entry per variant,
-        // since every entry would resolve to the same adaptive master URL.
-        return listOf(
-            Video(
-                url = masterUrl,
-                quality = "Narto Drama · Auto",
-                videoUrl = masterUrl,
-                headers = playbackHeaders,
-                subtitleTracks = subs,
-            ),
-        )
-    }
+    private fun buildMasterVideos(masterUrl: String, subs: List<Track>): List<Video> = listOf(
+        Video(
+            url = masterUrl,
+            quality = "Narto Drama · Auto",
+            videoUrl = masterUrl,
+            headers = playbackHeaders,
+            subtitleTracks = subs,
+        ),
+    )
 
     private fun masterVideo(masterUrl: String, subs: List<Track>, heightLabels: List<Int>, headers: Headers): Video = Video(
         url = masterUrl,
@@ -382,25 +345,6 @@ class Nartodrama :
         val isMydramawaveMaster = host == "video-v6.mydramawave.com" && path.contains("/vt/")
         return isStardustFlat || isKalostvFlat || (!isMydramawaveMaster && path.contains("/hls/"))
     }
-
-    // Sort by the user-chosen default quality: place it first (fastest start)
-    // then the rest ascending, so the player lands on the selected quality.
-    private fun List<Video>.orderByDefaultQuality(): List<Video> {
-        val ascending = sortedBy { it.quality.heightOf() }
-        return when (val pref = preferences.getString(PREF_DEFAULT_QUALITY, DEFAULT_QUALITY) ?: DEFAULT_QUALITY) {
-            "auto" -> ascending
-            "max" -> ascending.reversed()
-            else -> {
-                val target = pref.toIntOrNull() ?: return ascending
-                val chosen = ascending.indexOfFirst { it.quality.heightOf() == target }
-                    .takeIf { it != -1 } ?: return ascending
-                listOf(ascending[chosen]) + ascending.filterIndexed { i, _ -> i != chosen }
-            }
-        }
-    }
-
-    private fun String.heightOf(): Int = Regex("""(\d{3,4})p""").find(this)
-        ?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE
 
     private fun episodeSlug(episodeUrl: String): String {
         val segments = episodeUrl.toHttpUrlOrNull()?.pathSegments ?: return ""
