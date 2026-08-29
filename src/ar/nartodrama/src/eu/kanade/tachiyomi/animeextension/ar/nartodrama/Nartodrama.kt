@@ -240,13 +240,15 @@ class Nartodrama :
         val payload = client.newCall(GET(refreshUrl, headers)).execute()
             .parseAs<RefreshSourceDto>()
 
-        if (payload.directPlayUrl.isNullOrBlank()) return emptyList()
-
         // The direct (unproxied) mydramawave master is preferred: it is the same
         // CDN sequence drama4all plays (verified to stream audio natively), and
         // it avoids the stream.narto-drama.com JWT proxy entirely (no per-segment
-        // token fetch, no Cloudflare 403 on that host).
-        val masterUrl = payload.directPlayUrl
+        // token fetch, no Cloudflare 403 on that host). Fall back to the proxied
+        // play_url when the direct master is absent so episodes that expose only
+        // the proxied stream still get a playable video.
+        val masterUrl = payload.directPlayUrl?.takeIf { it.isNotBlank() }
+            ?: payload.playUrl?.takeIf { it.isNotBlank() }
+            ?: return emptyList()
 
         // Reuse a small in-memory cache so the subtitle list is never rebuilt
         // twice for the same episode: the transcript confirms the very first
